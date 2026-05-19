@@ -20,7 +20,7 @@ export interface Order {
     type: Type
     margin: number,
     kind: Kind,
-    price: number,
+    price?: number,
     status: Status,
     qty: number
 }
@@ -29,7 +29,7 @@ export interface OrderType {
     type: Type
     margin: number,
     kind: Kind,
-    price: number,
+    price?: number,
     qty: number
 }
 
@@ -87,5 +87,4 @@ export type User = Record<string, {
     positions: Positions[],
     orders: Order[]
     fills: Fill[]
-
 }>
