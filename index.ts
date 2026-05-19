@@ -1,7 +1,7 @@
 import express, { urlencoded, type NextFunction, type Request, type Response } from "express";
-import type { Collateral, FillInfo, Kind, MARKET, Order, Orderbook, Orderbooks, OrderType, Status, Type, User } from "./store/types";
+import type { Bid, Collateral, Fill, FillInfo, Kind, MARKET, Order, Orderbook, Orderbooks, OrderType, Status, Type, User } from "./store/types";
 import { OrderedMap, Stack } from "js-sdsl";
-import { collapseTextChangeRangesAcrossMultipleVersions, isAssertsKeyword } from "typescript";
+import { collapseTextChangeRangesAcrossMultipleVersions, isAssertsKeyword, validateLocaleAndSetLanguage } from "typescript";
 import { password } from "bun";
 
 const app = express();
@@ -61,9 +61,8 @@ function createLongLimitOrder(userId: string, currentOrder: Order) {
     let remainingQty = currentOrder.qty;
 
     if (shortSide.front()) {
-
         const [bestPrice, PriceLevelOrder] = shortSide.front()!
-        while (!shortSide.front() && remainingQty > 0) {
+        while (shortSide.front() && remainingQty > 0) {
             if (bestPrice <= currentOrder.price) {
                 if (PriceLevelOrder.availableQty >= currentOrder.qty) {
                     while (remainingQty > 0 && PriceLevelOrder.openOrders.length !== 0) {
@@ -72,15 +71,24 @@ function createLongLimitOrder(userId: string, currentOrder: Order) {
                         if (topOrderRemainingQty >= remainingQty) {
                             topOpenOrder!.filledQty += remainingQty;
                             remainingQty = remainingQty - topOrderRemainingQty > 0 ? remainingQty - topOrderRemainingQty : 0;
-
+                            fillInfo.push([bestPrice, topOrderRemainingQty])
+                            if (remainingQty === 0) {
+                                changeOrderStatus(userId, "FILLED", currentOrder.orderId);
+                            }
                             if (topOpenOrder?.filledQty === topOpenOrder?.qty) {
-                                changeOrderStatus(userId, "FILLED", currentOrder.orderId)
-                                changeOrderStatus()
-                                break;
+                                changeOrderStatus(topOpenOrder!.userId, "FILLED", topOpenOrder!.orderId)
                             }
                         }
                         // else move to next order
-                        PriceLevelOrder.openOrders.shift();
+                        topOpenOrder!.filledQty += topOrderRemainingQty
+                        remainingQty -= topOrderRemainingQty;
+                        fillInfo.push({
+                            price: bestPrice,
+                            qty: remainingQty
+                        })
+                        if (topOpenOrder?.filledQty === topOpenOrder!.qty) {
+                            PriceLevelOrder.openOrders.shift();
+                        }
                     }
                 }
 
@@ -110,9 +118,10 @@ function createLongLimitOrder(userId: string, currentOrder: Order) {
                 buySide.setElement(currentOrder.price, priceLevel);
             }
         }
+
     }
 
-    if (remainingQty == 0) currentOrder.status = 'FILLED'
+    if (remainingQty === 0) currentOrder.status = 'FILLED'
     else currentOrder.status = 'PENDING'
 
     const buySide = getSameSide(currentOrder.market, currentOrder.type)
@@ -129,14 +138,102 @@ function createLongLimitOrder(userId: string, currentOrder: Order) {
         return {
             ok: true,
             data: {
+                filledQty: remainingQty === 0 ? currentOrder.qty : currentOrder.qty - remainingQty,
+                totalQty: currentOrder.qty,
+                fills: fillInfo,
+
             }
         }
     }
 
 }
-function createShortLimitOrder(currentOrder: Order) {
+function addToUserFills(userId: string, fill: Fill) {
+    const userAvailabel = user[userId];
+    if (!userAvailabel) break;
+
+    userAvailabel?.fills.push(fill)
+}
+function matchOrder(userId: string, order: Order) {
+    // 1. match orders .
+    // 2. update order balance
+    let fillInfo: FillInfo[] = []
+    const oppositeSide = getOppositeSide(order.market, order.type);
+    let remmainingQty = order.qty;
+    while (oppositeSide.front() && remmainingQty > 0) {
+        const [bestPrice, priceLevel] = oppositeSide.front()!;
+
+        const priceCondition = order.type === "LONG" ? bestPrice <= order.price : bestPrice >= order.price
+
+        if (priceCondition) {
+            // if (priceLevel.availableQty >= order.qty) {
+            const topOpenOrder = priceLevel.openOrders[0];
+            priceLevel.availableQty -= remmainingQty;
+
+            while (topOpenOrder && remmainingQty > 0) {
+                const topOrderRemainingQty = topOpenOrder!.qty - topOpenOrder!.filledQty;
+                if (topOrderRemainingQty >= remmainingQty) {
+                    remmainingQty = 0;
+                    topOpenOrder.filledQty += remmainingQty;
+                    fillInfo.push({
+                        price: bestPrice,
+                        qty: order.qty
+                    })
+                    changeOrderStatus(userId, "FILLED", order.orderId);
+                    if (topOpenOrder.filledQty === topOpenOrder.qty) {
+                        changeOrderStatus(topOpenOrder.userId, "FILLED", topOpenOrder.orderId);
+                    }
+                }
+                priceLevel.openOrders.shift();
+            }
+
+            // }
+
+        }
+        oppositeSide.eraseElementByKey(bestPrice)
+    }
+    return {
+        filledQty: order.qty - remmainingQty,
+        fillInfo
+    }
 
 }
+function putInOrderbook(userId: string, order: Order) {
+    const sameSide = getSameSide(order.market, order.type);
+    let orderDetails: Bid = {
+        availableQty: order.qty,
+        openOrders: [{
+            userId,
+            qty: order.qty,
+            filledQty: 0,
+            orderId: order.orderId,
+            createdAt: new Date()
+        }]
+    }
+
+    const pushPrice = sameSide.getElementByKey(order.price);
+    if (!pushPrice) {
+        // create price 
+        sameSide.setElement(order.price, orderDetails)
+        return 
+    }
+    pushPrice!.availableQty += order.qty
+    pushPrice?.openOrders.push(...orderDetails.openOrders)
+    sameSide.setElement(order.price, pushPrice)
+}
+function createShortLimitOrder(userId: string, currentOrder: Order) {
+
+    // match as much as we can
+    let { filledQty, fillInfo } = matchOrder(userId, currentOrder)
+
+    // sit on same side
+    if (filledQty < currentOrder.qty && currentOrder.kind == 'LIMIT')
+        putInOrderbook(userId , currentOrder)
+    
+
+
+}
+
+
 function creareLongMarketOrder(currentOrder: Order) {
 
 }

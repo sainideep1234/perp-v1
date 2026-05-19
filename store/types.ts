@@ -43,7 +43,7 @@ export interface Positions {
 
 }
 
-interface Fill {
+export interface Fill {
     sellerId: string,
     buyerId: string,
     orderId: string,
@@ -51,11 +51,14 @@ interface Fill {
     totalQty: number
 }
 // [[100 , 3] , [102 , 5]]
-export type FillInfo = [number, number][]
+export type FillInfo = {
+    price:number , 
+    qty : number
+}
 
 
 
-type Bid = {
+export type Bid = {
     availableQty: number,
     openOrders: { userId: string, qty: number, filledQty: number, orderId: string, createdAt: Date }[]
 }
@@ -64,7 +67,6 @@ export type Orderbook = {
     asks: OrderedMap<number, Bid>,
     lastTradedPrice: number,
     indexPrice: number // average price of multiple exchange
-    fills: Fill[]
 }
 
 /*
@@ -84,4 +86,6 @@ export type User = Record<string, {
     collateral: Collateral,
     positions: Positions[],
     orders: Order[]
+    fills: Fill[]
+
 }>
