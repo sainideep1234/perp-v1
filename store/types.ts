@@ -1,7 +1,9 @@
 import { OrderedMap } from "js-sdsl"
+import { MAX_LEVERAGE } from ".."
 
 // simple bat hai market mai se nikalne ke liye positions close karni padegi qty = 0
 export type MARKET = "SOL" | "USD" | "BTC"
+export const market: MARKET[] = ["BTC", "SOL"]
 export type Type = "LONG" | "SHORT"
 export type Kind = "LIMIT" | "MARKET"
 export type Status = "FILLED" | "CANCELLED" | "PENDING"
@@ -52,8 +54,8 @@ export interface Fill {
 }
 // [[100 , 3] , [102 , 5]]
 export type FillInfo = {
-    price:number , 
-    qty : number
+    price: number,
+    qty: number
 }
 
 
@@ -88,3 +90,30 @@ export type User = Record<string, {
     orders: Order[]
     fills: Fill[]
 }>
+
+
+/*
+
+
+{
+    market: "SOL", 
+    type:"SHORT", 
+    qty:10, 
+    price:100, 
+    margin: 500 ,  
+
+}
+    if SOL mark price gets to 150 =>than 10 *100 - 150*10   = 500 loss
+    if SOL mark price gets to 50 => than 10 *100 - 50*10 = 500 profit 
+
+{
+    market: "SOL", 
+    type:"LONG", 
+    qty:10, 
+    price:100, 
+    margin: 500 ,  
+
+}
+    if SOL mark price gets to 150 =>than 150*10  - 10 *100     = 500 profit
+    if SOL mark price gets to 50 => than 50*10 - 10 *100  = 500 loss 
+*/

@@ -1,13 +1,16 @@
-import express, { response, urlencoded, type NextFunction, type Request, type Response } from "express";
-import type { Bid, Collateral, Fill, FillInfo, Kind, MARKET, Order, Orderbook, Orderbooks, OrderType, Status, Type, User } from "./store/types";
-import { OrderedMap, Stack } from "js-sdsl";
-import { collapseTextChangeRangesAcrossMultipleVersions, isAssertsKeyword, validateLocaleAndSetLanguage } from "typescript";
-import { password } from "bun";
+import express, { type NextFunction, type Request, type Response } from "express";
+import type { Bid, Collateral, Fill, FillInfo, MARKET, Order, Orderbook, Orderbooks, OrderType, Status, Type, User } from "./store/types";
+import { OrderedMap } from "js-sdsl";
+import { startListeningToBinanceForMarkPrice } from "./BinanceMarkPrice";
 
 const app = express();
-const orderbook: Orderbooks = {}
-const user: User = {}
-const MAX_LEVERAGE = 10;
+export const orderbook: Orderbooks = {}
+export const user: User = {}
+export const MAX_LEVERAGE = 10;
+
+startListeningToBinanceForMarkPrice();
+
+
 /*
 {
     qty:10, 
@@ -29,21 +32,19 @@ const MAX_LEVERAGE = 10;
 on above levrage calculated as 10 * 100 = 1000/ 500 = 2x 
 */
 
+function calculateAveragePrice(fillInfo: FillInfo[]) {
+    const totalAvailable = fillInfo.reduce((acc, curr) => {
+        acc.totalPrice += curr.qty * curr.price;
+        acc.totalQty += curr.qty
+        return acc
+    }, { totalQty: 0, totalPrice: 0 })
 
-function calculateLeverage(equity: number, qty: number, marketPriceOfAsset: number) {
-    // how much user paying , how much qty it wants 
-    // @marketPriceOfAsset = in limit it is price that user want to buy , in market it is average price @ which your qty ecute
-    const totalOrdervalue = qty * marketPriceOfAsset;
-    const leverage = totalOrdervalue / equity;
-    return leverage
+    return {
+        averagePrice: totalAvailable.totalPrice / totalAvailable.totalQty,
+        filledQty: totalAvailable.totalQty
+    }
 }
 
-// this function is call for each user positions
-// this function is call for each market as well
-function calculateLiquidation(marketPriceOfAsset: number) {
-    // go to each user all positions 
-
-}
 
 function changePosition(userId: string, market: MARKET, type: Type, qty: number, margin: number, liquidationPrice: number, averagePrice: number) {
     const userAvailabel = user[userId];
@@ -55,12 +56,17 @@ function changePosition(userId: string, market: MARKET, type: Type, qty: number,
         liquidationPrice,
         averagePrice
     }
-    if (!userAvailabel) {
+    const position = userAvailabel?.positions.find((pos) => pos.market === market && pos.type ===
+        type)
+
+    if (!position) {
         userAvailabel!.positions.push(positionDetail)
         return;
     }
 
-    userAvailabel.positions.push(positionDetail)
+    position.averagePrice += averagePrice
+    position.averagePrice /= 2;
+    position.qty += qty
 }
 
 function changeOrderStatus(userId: string, status: Status, orderId: string) {
@@ -112,7 +118,11 @@ function createLongLimitOrder(userId: string, currentOrder: Order) {
                         if (topOpenOrder?.filledQty === topOpenOrder!.qty) {
                             PriceLevelOrder.openOrders.shift();
                         }
+
+                        const sellerMargin = getMarginOfUser(topOpenOrder!.userId, topOpenOrder!.orderId)
+                        // changePosition(topOpenOrder!.userId, currentOrder.market, "SHORT", , sellerMargin, 0,)
                     }
+
                 }
 
                 // order sit on same side
@@ -156,22 +166,17 @@ function createLongLimitOrder(userId: string, currentOrder: Order) {
     } else {
         priceLevel.availableQty += currentOrder.qty;
         priceLevel.openOrders.push(orderDetail);
-        buySide.setElement(currentOrder.price!, priceLevel);
-        const totalAvergae = fillInfo.reduce((acc, curr) => {
-            acc.totalQty += curr.price * curr.qty;
-            acc.totalPrice += curr.qty
-            return acc
-        }, {
-            totalQty: 0,
-            totalPrice: 0
-        })
+        const { averagePrice, filledQty } = calculateAveragePrice(fillInfo);
 
-        changePosition(userId, currentOrder.market, currentOrder.type, totalAvergae.totalQty, currentOrder.margin, 0, totalAvergae.totalPrice / totalAvergae.totalQty)
+        changePosition(userId, currentOrder.market, currentOrder.type, filledQty, currentOrder.margin, 0, averagePrice)
+
+
         return {
             ok: true,
             data: {
-                filledQty: remainingQty === 0 ? currentOrder.qty : currentOrder.qty - remainingQty,
+                filledQty,
                 totalQty: currentOrder.qty,
+                averagePrice,
                 fills: fillInfo,
 
             }
@@ -182,8 +187,6 @@ function createLongLimitOrder(userId: string, currentOrder: Order) {
 
 function addToUserFills(userId: string, fill: Fill) {
     const userAvailabel = user[userId];
-    if (!userAvailabel) break;
-
     userAvailabel?.fills.push(fill)
 }
 
@@ -273,26 +276,146 @@ function createShortLimitOrder(userId: string, currentOrder: Order) {
     }, { totalQty: 0, totalPrice: 0 })
 
     changePosition(userId, currentOrder.market, currentOrder.type, totalAvergae.totalQty, currentOrder.margin, 0, totalAvergae.totalPrice / totalAvergae.totalQty);
-
+    const { averagePrice, filledQty: totalFilledQty } = calculateAveragePrice(fillInfo);
     return {
         ok: true,
         data: {
             fills: fillInfo,
-            filledQty,
+            averagePrice,
+            filledQty: totalFilledQty,
             totalQty: currentOrder.qty
         }
     }
 }
+function getMarginOfUser(userId: string, orderId: string) {
+    const userAvailabel = user[userId];
+    const orderMargin = userAvailabel!.orders.find((order) => {
+        return order.orderId === orderId
+    })
 
+    return orderMargin?.margin
+}
 
-function createLongMarketOrder(currentOrder: Order) {
+function createLongMarketOrder(userId: string, currentOrder: Order) {
     let fillInfo: FillInfo[] = [];
-    
+    const shortSide = getOppositeSide(currentOrder.market, currentOrder.type);
+    let remainingQty = currentOrder.qty
+    while (shortSide.front() && remainingQty > 0) {
 
-}
-function createShortMarketOrder(currentOrder: Order) {
+        const [bestPrice, priceLevel] = shortSide.front()!;
+        const tradeQty = Math.min(remainingQty, priceLevel.availableQty);
 
+        priceLevel.availableQty -= tradeQty;
+        const topPriceLevelOrder = priceLevel.openOrders[0]
+        while (topPriceLevelOrder && remainingQty > 0) {
+            const priceLevelAvailabelQty = topPriceLevelOrder.qty - topPriceLevelOrder.filledQty;
+            const priceTradeQty = Math.min(priceLevelAvailabelQty, remainingQty);
+            topPriceLevelOrder.filledQty += priceTradeQty;
+            remainingQty -= priceTradeQty;
+            changePosition(userId, currentOrder.market, "LONG", priceLevelAvailabelQty, currentOrder.margin, 0, bestPrice);
+            const topOrderMargin = getMarginOfUser(topPriceLevelOrder.userId, topPriceLevelOrder.orderId)
+            changePosition(topPriceLevelOrder.userId, currentOrder.market, "SHORT", priceLevelAvailabelQty, topOrderMargin!, 0, bestPrice)
+            fillInfo.push({
+                price: bestPrice,
+                qty: priceLevelAvailabelQty
+            });
+            const fillsDetails: Fill = {
+                sellerId: topPriceLevelOrder.userId,
+                buyerId: userId,
+                filledQty: priceLevelAvailabelQty,
+                orderId: currentOrder.orderId,
+                totalQty: currentOrder.qty
+            }
+            addToUserFills(userId, fillsDetails);
+        }
+        if (remainingQty === 0) {
+            changeOrderStatus(userId, "FILLED", currentOrder.orderId);
+        }
+        if (topPriceLevelOrder?.filledQty === topPriceLevelOrder?.qty) {
+            changeOrderStatus(userId, "FILLED", currentOrder.orderId)
+        }
+    }
+    const { filledQty, averagePrice } = calculateAveragePrice(fillInfo);
+
+    return {
+        ok: true,
+        data: {
+            filledQty: filledQty,
+            totalQty: currentOrder.qty,
+            averagePrice,
+            fillInfo
+        }
+    }
 }
+function createShortMarketOrder(userId: string, currentOrder: Order) {
+    let fillInfo: FillInfo[] = [];
+
+    const longSide = getOppositeSide(currentOrder.market, currentOrder.type)
+    let remainingQty = currentOrder.qty;
+
+    while (remainingQty > 0 && longSide.front()) {
+        const [bestPrice, pricelevel] = longSide.front()!;
+
+        const tradeQty = Math.min(pricelevel.availableQty - remainingQty);
+
+        pricelevel.availableQty -= tradeQty;
+        const topOrder = pricelevel.openOrders[0];
+        while (topOrder && remainingQty > 0) {
+            const orderLevelRemainingQty = topOrder.qty - topOrder.filledQty;
+            const orderLevelTradeQty = Math.min(orderLevelRemainingQty, remainingQty);
+
+            remainingQty -= orderLevelTradeQty;
+            topOrder.filledQty += orderLevelTradeQty;
+            fillInfo.push({
+                price: bestPrice,
+                qty: orderLevelTradeQty
+            })
+            let sellfillDetails: Fill = {
+                sellerId: userId,
+                buyerId: topOrder.userId,
+                filledQty: orderLevelTradeQty,
+                orderId: currentOrder.orderId,
+                totalQty: currentOrder.qty
+
+            }
+
+            let buyFillDetails: Fill = {
+                sellerId: topOrder.userId,
+                buyerId: userId,
+                filledQty: orderLevelTradeQty,
+                orderId: currentOrder.orderId,
+                totalQty: currentOrder.qty
+
+            }
+
+            addToUserFills(userId, sellfillDetails);
+            addToUserFills(topOrder.userId, buyFillDetails);
+            if (topOrder.filledQty === topOrder.qty) {
+                changeOrderStatus(topOrder.userId, "FILLED", topOrder.orderId)
+                pricelevel.openOrders.shift();
+            }
+        }
+        if (pricelevel.availableQty === 0) {
+
+        }
+        if (remainingQty === 0) {
+            changeOrderStatus(userId, "FILLED", currentOrder.orderId);
+        }
+        longSide.eraseElementByKey(bestPrice);
+    }
+    const { filledQty, averagePrice } = calculateAveragePrice(fillInfo);
+
+    return {
+        ok: true,
+        data: {
+            filledQty: filledQty,
+            averagePrice: averagePrice,
+            totalQty: currentOrder.qty,
+            fillInfo
+        }
+    }
+}
+
 
 function getBalance(userId: string): Collateral | null {
     let userBalance = user[userId];
@@ -445,11 +568,11 @@ app.post("/order", (req, res) => {
             return;
         }
         if (type === "LONG") {
-            const orderResponse = createLongMarketOrder(currentOrder);
+            const orderResponse = createLongMarketOrder(userId, currentOrder);
             return orderResponse.data;
 
         } else {
-            const orderResponse = createShortMarketOrder(currentOrder);
+            const orderResponse = createShortMarketOrder(userId, currentOrder);
             return orderResponse.data;
         }
 
