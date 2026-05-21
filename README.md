@@ -22,4 +22,7 @@ This project was created using `bun init` in bun v1.3.13. [Bun](https://bun.com)
 - we have to implement isolate margin 
 
 ## CONCEPTS TO LOOK LATER 
+--- 
 - we convert price in string to numebr using Number(sting_price) or parseFloat(string_number) not use parseInt(string_price) it covert it into whole number delete digits after decimal
+
+- Right now margin will settle only after , when the whole position gets closed or qty =0 until than no order margin will release .

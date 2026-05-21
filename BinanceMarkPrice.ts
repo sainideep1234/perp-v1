@@ -1,3 +1,4 @@
+import { calculateLiquidation } from "./liquidation-engine";
 import { market, type MARKET } from "./store/types";
 import WebSocket from "ws";
 const ws = new WebSocket("wss://fstream.binance.com/market/stream");
@@ -30,10 +31,13 @@ export function startListeningToBinanceForMarkPrice() {
         const capitalAsset = asset?.toUpperCase();
 
         if (capitalAsset === "BTC") {
-            MarkPriceBook.BTC = markPrice
+            MarkPriceBook.BTC = Number(markPrice)
+            calculateLiquidation(markPrice, "BTC")
         }
+        
         if (capitalAsset === "SOL") {
-            MarkPriceBook.SOL = markPrice
+            MarkPriceBook.SOL = Number(markPrice)
+            calculateLiquidation(markPrice, "SOL")
         }
         console.log(MarkPriceBook)
     })

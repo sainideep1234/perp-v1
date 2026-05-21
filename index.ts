@@ -11,6 +11,7 @@ export const MAX_LEVERAGE = 10;
 startListeningToBinanceForMarkPrice();
 
 
+
 /*
 {
     qty:10, 
@@ -32,6 +33,8 @@ startListeningToBinanceForMarkPrice();
 on above levrage calculated as 10 * 100 = 1000/ 500 = 2x 
 */
 
+
+
 function calculateAveragePrice(fillInfo: FillInfo[]) {
     const totalAvailable = fillInfo.reduce((acc, curr) => {
         acc.totalPrice += curr.qty * curr.price;
@@ -46,27 +49,87 @@ function calculateAveragePrice(fillInfo: FillInfo[]) {
 }
 
 
-function changePosition(userId: string, market: MARKET, type: Type, qty: number, margin: number, liquidationPrice: number, averagePrice: number) {
+function changePosition(userId: string, market: MARKET, incomingType: Type, qty: number, margin: number, liquidationPrice: number, averagePrice: number) {
     const userAvailabel = user[userId];
-    const positionDetail = {
-        market,
-        type,
-        qty,
-        margin,
-        liquidationPrice,
-        averagePrice
-    }
-    const position = userAvailabel?.positions.find((pos) => pos.market === market && pos.type ===
-        type)
+    if (!userAvailabel) return
 
-    if (!position) {
-        userAvailabel!.positions.push(positionDetail)
+    const longPos = userAvailabel?.positions.find((pos) => {
+        return pos.type === "LONG" && pos.market === market
+    })
+
+
+    const shortPos = userAvailabel?.positions.find((pos) => {
+
+        return pos.type === "SHORT" && pos.market === market
+    })
+
+    if (incomingType === "LONG" && !shortPos) {
+        if (!longPos) {
+            userAvailabel?.positions.push({
+                averagePrice,
+                liquidationPrice: 0,
+                margin,
+                market,
+                qty,
+                type: incomingType
+            })
+            return
+        }
+
+
+        const totalQty = longPos.qty + qty;
+
+        longPos.averagePrice =
+            (
+                (longPos.averagePrice * longPos.qty) +
+                (averagePrice * qty)
+            ) / totalQty;
+
+        longPos.qty = totalQty;
+
+        return
+    }
+
+    if (incomingType === "SHORT" && !longPos) {
+        if (!shortPos) {
+            userAvailabel?.positions.push({
+                averagePrice,
+                liquidationPrice: 0,
+                margin,
+                market,
+                qty,
+                type: incomingType
+            })
+            return
+        }
+
+
+        shortPos.qty += qty;
+        shortPos.averagePrice = ((shortPos.averagePrice * shortPos.qty) + (qty * averagePrice)) / qty + shortPos.qty;
+        return
+    }
+
+    const oppositePos = incomingType === "LONG" ? shortPos : longPos;
+
+    if (!oppositePos) return;
+
+    if (oppositePos.qty > qty) {
+        oppositePos.qty -= qty;
+    }
+    if (oppositePos.qty === qty) {
+        oppositePos.qty -= qty;
+        userAvailabel.collateral.available += oppositePos.margin;
+
+        userAvailabel.collateral.locked -= oppositePos.margin;
+        userAvailabel.positions = user[userId]?.positions.filter((pos) => pos !== oppositePos)!;
+
         return;
     }
+    if (oppositePos.qty < qty) {
+        oppositePos.qty = Math.abs(oppositePos.qty - qty);
+        oppositePos.type = incomingType === "LONG" ? "SHORT" : "LONG"
 
-    position.averagePrice += averagePrice
-    position.averagePrice /= 2;
-    position.qty += qty
+    }
 }
 
 function changeOrderStatus(userId: string, status: Status, orderId: string) {
@@ -75,7 +138,7 @@ function changeOrderStatus(userId: string, status: Status, orderId: string) {
         return order.orderId === orderId
     })
     if (getOrder) {
-        getOrder?.status === status
+        getOrder.status = status
     }
 }
 
@@ -199,18 +262,18 @@ function matchOrder(userId: string, order: Order) {
     while (oppositeSide.front() && remmainingQty > 0) {
         const [bestPrice, priceLevel] = oppositeSide.front()!;
 
-        const priceCondition = order.type === "LONG" ? bestPrice <= order.price! : bestPrice >= order.price
+        const priceCondition = order.type === "LONG" ? bestPrice <= order.price! : bestPrice >= order.price!
 
         if (priceCondition) {
             // if (priceLevel.availableQty >= order.qty) {
             const topOpenOrder = priceLevel.openOrders[0];
             priceLevel.availableQty -= remmainingQty;
 
-            while (topOpenOrder && remmainingQty > 0) {
+            while (priceLevel.openOrders.length && remmainingQty > 0) {
                 const topOrderRemainingQty = topOpenOrder!.qty - topOpenOrder!.filledQty;
                 if (topOrderRemainingQty >= remmainingQty) {
-                    remmainingQty = 0;
                     topOpenOrder.filledQty += remmainingQty;
+                    remmainingQty = 0;
                     fillInfo.push({
                         price: bestPrice,
                         qty: order.qty
@@ -223,11 +286,13 @@ function matchOrder(userId: string, order: Order) {
                 }
                 priceLevel.openOrders.shift();
             }
+            if (priceLevel.availableQty === 0) {
+                oppositeSide.eraseElementByKey(bestPrice)
 
-            // }
+            }
 
         }
-        oppositeSide.eraseElementByKey(bestPrice)
+
     }
     return {
         filledQty: order.qty - remmainingQty,
@@ -296,7 +361,7 @@ function getMarginOfUser(userId: string, orderId: string) {
     return orderMargin?.margin
 }
 
-function createLongMarketOrder(userId: string, currentOrder: Order) {
+export function createLongMarketOrder(userId: string, currentOrder: Order) {
     let fillInfo: FillInfo[] = [];
     const shortSide = getOppositeSide(currentOrder.market, currentOrder.type);
     let remainingQty = currentOrder.qty
@@ -347,7 +412,8 @@ function createLongMarketOrder(userId: string, currentOrder: Order) {
         }
     }
 }
-function createShortMarketOrder(userId: string, currentOrder: Order) {
+
+export function createShortMarketOrder(userId: string, currentOrder: Order) {
     let fillInfo: FillInfo[] = [];
 
     const longSide = getOppositeSide(currentOrder.market, currentOrder.type)
@@ -356,7 +422,7 @@ function createShortMarketOrder(userId: string, currentOrder: Order) {
     while (remainingQty > 0 && longSide.front()) {
         const [bestPrice, pricelevel] = longSide.front()!;
 
-        const tradeQty = Math.min(pricelevel.availableQty - remainingQty);
+        const tradeQty = Math.min(pricelevel.availableQty, remainingQty);
 
         pricelevel.availableQty -= tradeQty;
         const topOrder = pricelevel.openOrders[0];
@@ -427,7 +493,7 @@ function getBalance(userId: string): Collateral | null {
     return userBalance.collateral
 }
 
-function createUserOrder(userId: string, currentOrder: OrderType) {
+export function createUserOrder(userId: string, currentOrder: OrderType) {
     const userAvailabel = user[userId];
     if (!userAvailabel) {
         return null
@@ -437,7 +503,7 @@ function createUserOrder(userId: string, currentOrder: OrderType) {
         orderId,
         market: currentOrder.market,
         type: currentOrder.type,
-        margin: currentOrder.,
+        margin: currentOrder.margin,
         kind: currentOrder.kind,
         price: currentOrder.price,
         status: "PENDING" as Status,
@@ -499,6 +565,7 @@ function getSameSide(market: MARKET, curentSide: Type) {
 }
 
 
+
 app.post("/order", (req, res) => {
     const { qty, market, kind, price, type, equity } = req.body;
     if (!qty || !market || !kind || !type || !equity) {
@@ -511,7 +578,7 @@ app.post("/order", (req, res) => {
     if (!userId) {
         return res.status(400).json({
             ok: false,
-            error: "USER_ID_NOT_PRESEN"
+            error: "USER_ID_NOT_PRESENT"
         })
     }
     const userBalance = getBalance(userId!);
@@ -521,13 +588,18 @@ app.post("/order", (req, res) => {
             error: "INSUFFICIENT_BALANCE"
         })
     }
+
     const { available, locked } = userBalance;
     if (available >= equity) {
         const updatedBalanceAvailabel = equity - available;
         const updatedBalanceLocked = equity + locked;
         updateLockedOrAvailabelBalance(userId!, updatedBalanceAvailabel, updatedBalanceLocked);
 
+        const userPosition = user[userId]?.positions.find((pos) => {
+            if (pos.type === type && pos.qty > 0) {
 
+            }
+        })
 
         if (kind === "LIMIT" && price) {
             let orderDetails: OrderType = {
